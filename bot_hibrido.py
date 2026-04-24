@@ -4,11 +4,12 @@ import logging
 import pandas as pd
 import numpy as np
 import os
+import requests
 from flask import Flask, jsonify
 from threading import Thread
 
 # ============================
-# LOGGING LIGERO
+# LOGGING
 # ============================
 logging.basicConfig(
     level=logging.INFO,
@@ -18,21 +19,35 @@ logging.basicConfig(
 # ============================
 # CONFIGURACIÓN
 # ============================
-API_KEY = os.getenv("API_KEY")
-API_SECRET = os.getenv("API_SECRET")
+API_KEY = os.getenv("API_KEY")          # NO se usarán para trading
+API_SECRET = os.getenv("API_SECRET")    # pero las dejamos por si las necesitas luego
+
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 SYMBOL = "BTC/USDT"
 TIMEFRAME = "1m"
-CANTIDAD = 0.001
 
 # ============================
-# EXCHANGE
+# EXCHANGE (solo para datos)
 # ============================
 exchange = ccxt.mexc({
     "apiKey": API_KEY,
     "secret": API_SECRET,
     "enableRateLimit": True
 })
+
+# ============================
+# TELEGRAM
+# ============================
+def enviar_telegram(msg):
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
+        requests.post(url, json=payload)
+        logging.info(f"Telegram enviado: {msg}")
+    except Exception as e:
+        logging.error(f"Error enviando Telegram: {e}")
 
 # ============================
 # OBTENER OHLCV
@@ -47,7 +62,7 @@ def get_ohlcv():
         return None
 
 # ============================
-# INDICADORES LIGEROS
+# INDICADORES
 # ============================
 def indicadores(df):
     df["ema_fast"] = df["close"].ewm(span=9).mean()
@@ -77,24 +92,10 @@ def generar_senal(df):
     return "HOLD"
 
 # ============================
-# EJECUTAR ORDEN
-# ============================
-def ejecutar_orden(tipo):
-    try:
-        if tipo == "BUY":
-            order = exchange.create_market_buy_order(SYMBOL, CANTIDAD)
-        else:
-            order = exchange.create_market_sell_order(SYMBOL, CANTIDAD)
-
-        logging.info(f"Orden ejecutada: {order}")
-    except Exception as e:
-        logging.error(f"Error ejecutando orden: {e}")
-
-# ============================
 # LOOP PRINCIPAL DEL BOT
 # ============================
 async def bot_loop():
-    logging.info("Bot híbrido PRO v2 LITE unificado iniciado en Fly.io")
+    logging.info("Bot híbrido PRO LITE (solo señales) iniciado en Fly.io")
 
     while True:
         df = get_ohlcv()
@@ -108,7 +109,8 @@ async def bot_loop():
         logging.info(f"Señal actual: {senal}")
 
         if senal in ["BUY", "SELL"]:
-            ejecutar_orden(senal)
+            mensaje = f"📡 Señal detectada: {senal} en {SYMBOL}"
+            enviar_telegram(mensaje)
 
         await asyncio.sleep(10)
 
@@ -128,12 +130,10 @@ def run_flask():
 # EJECUCIÓN UNIFICADA
 # ============================
 if __name__ == "__main__":
-    # Lanzar Flask en un hilo
     thread = Thread(target=run_flask)
     thread.daemon = True
     thread.start()
 
-    # Lanzar bot en asyncio
     try:
         asyncio.run(bot_loop())
     except Exception as e:
