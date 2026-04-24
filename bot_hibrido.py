@@ -67,7 +67,7 @@ def enviar_telegram(msg: str):
         logging.error(f"Error enviando Telegram: {e}")
 
 # ============================
-# INDICADORES
+# INDICADORES BÁSICOS
 # ============================
 def rsi(series, period=14):
     delta = series.diff()
@@ -87,20 +87,143 @@ def ema(series, period):
     return series.ewm(span=period).mean()
 
 # ============================
-# SMC PRO (FILTRADO)
+# UTILIDADES SMC
+# ============================
+def detectar_swing_highs_lows(df, lookback=2):
+    """
+    Marca swing highs y swing lows simples.
+    """
+    df["swing_high"] = False
+    df["swing_low"] = False
+
+    for i in range(lookback, len(df) - lookback):
+        high = df["high"].iloc[i]
+        lows = df["low"].iloc[i]
+        if high == max(df["high"].iloc[i - lookback:i + lookback + 1]):
+            df.at[df.index[i], "swing_high"] = True
+        if lows == min(df["low"].iloc[i - lookback:i + lookback + 1]):
+            df.at[df.index[i], "swing_low"] = True
+
+    return df
+
+def detectar_bos_choc(df):
+    """
+    BOS / CHoCH muy simplificado basado en swing highs/lows.
+    """
+    swings = df[(df["swing_high"]) | (df["swing_low"])].copy()
+    if len(swings) < 4:
+        return None, None
+
+    last_swings = swings.tail(4)
+    highs = last_swings["high"].values
+    lows = last_swings["low"].values
+
+    bos = None
+    direccion = None
+
+    # BOS alcista: último swing high rompe el anterior
+    if highs[-1] > highs[-2]:
+        bos = "BOS alcista"
+        direccion = "LONG"
+    # BOS bajista: último swing low rompe el anterior
+    elif lows[-1] < lows[-2]:
+        bos = "BOS bajista"
+        direccion = "SHORT"
+
+    return bos, direccion
+
+def detectar_liquidez(df, ventana=5):
+    """
+    Barrido de liquidez simple: rompe máximos o mínimos recientes.
+    """
+    low = df["low"]
+    high = df["high"]
+
+    liquidez_tomada = False
+    tipo = None
+
+    if low.iloc[-1] < min(low.iloc[-ventana:-1]):
+        liquidez_tomada = True
+        tipo = "Liquidez baja barrida"
+
+    if high.iloc[-1] > max(high.iloc[-ventana:-1]):
+        liquidez_tomada = True
+        tipo = "Liquidez alta barrida"
+
+    return liquidez_tomada, tipo
+
+def detectar_fvg(df):
+    """
+    FVG simple: gap entre vela -3 y -2.
+    """
+    if len(df) < 5:
+        return False
+
+    low_3 = df["low"].iloc[-3]
+    high_3 = df["high"].iloc[-3]
+    low_2 = df["low"].iloc[-2]
+    high_2 = df["high"].iloc[-2]
+
+    # FVG alcista: low(-2) > high(-3)
+    if low_2 > high_3:
+        return True
+    # FVG bajista: high(-2) < low(-3)
+    if high_2 < low_3:
+        return True
+
+    return False
+
+def detectar_order_block(df, direccion):
+    """
+    OB simple: última vela contraria antes del movimiento fuerte.
+    """
+    cuerpo = df["close"] - df["open"]
+    rango = (df["high"] - df["low"]).abs()
+    cuerpo_rel = (cuerpo.abs() / rango.replace(0, np.nan)).fillna(0)
+
+    # vela "fuerte"
+    idx_fuerte = cuerpo_rel.tail(10).idxmax()
+    vela_fuerte = df.loc[idx_fuerte]
+
+    if direccion == "LONG":
+        # OB bajista previo
+        prev = df.loc[:idx_fuerte].tail(5)
+        ob = prev[prev["close"] < prev["open"]]
+    else:
+        # OB alcista previo
+        prev = df.loc[:idx_fuerte].tail(5)
+        ob = prev[prev["close"] > prev["open"]]
+
+    if ob.empty:
+        return None, None
+
+    ob_vela = ob.iloc[-1]
+    ob_low = float(ob_vela["low"])
+    ob_high = float(ob_vela["high"])
+
+    return ob_low, ob_high
+
+# ============================
+# SMC PRO MEJORADO
 # ============================
 def analizar_smc_pro(df: pd.DataFrame, tipo: str):
-    if len(df) < 50:
+    if len(df) < 80:
         return None
 
     close = df["close"]
     high = df["high"]
     low = df["low"]
 
+    # Indicadores base
     df["ema_fast"] = ema(close, 9 if tipo == "scalp" else 21)
     df["ema_slow"] = ema(close, 21 if tipo == "scalp" else 50)
     df["rsi"] = rsi(close, 14)
     df["atr"] = atr(df, 14)
+
+    df = detectar_swing_highs_lows(df)
+    bos, direccion_bos = detectar_bos_choc(df)
+    if bos is None or direccion_bos is None:
+        return None
 
     last = df.iloc[-1]
     price = float(last["close"])
@@ -116,80 +239,62 @@ def analizar_smc_pro(df: pd.DataFrame, tipo: str):
     tendencia_alcista = ema_fast_val > ema_slow_val
     tendencia_bajista = ema_fast_val < ema_slow_val
 
-    # ============================
-    # FILTRO DE FUERZA
-    # ============================
-    fuerza = 0
+    # Dirección final basada en BOS + EMAs
+    side = None
+    if direccion_bos == "LONG" and tendencia_alcista:
+        side = "LONG"
+    elif direccion_bos == "SHORT" and tendencia_bajista:
+        side = "SHORT"
+    else:
+        return None
 
+    # Filtro de fuerza
+    fuerza = 0
     if tendencia_alcista or tendencia_bajista:
         fuerza += 1
-
     if rsi_val < 30 or rsi_val > 70:
         fuerza += 1
-
     if atr_val > price * 0.002:
         fuerza += 1
-
     if abs(ema_fast_val - ema_slow_val) > price * 0.0015:
         fuerza += 1
 
     if fuerza < 3:
         return None
 
-    # ============================
-    # BOS (pseudo)
-    # ============================
-    if tendencia_alcista and high.iloc[-1] > high.iloc[-2]:
-        estructura = "BOS alcista"
-    elif tendencia_bajista and low.iloc[-1] < low.iloc[-2]:
-        estructura = "BOS bajista"
-    else:
-        return None
-
-    # ============================
-    # LIQUIDEZ
-    # ============================
-    liquidez_tomada = False
-
-    if low.iloc[-1] < min(low.iloc[-5:-1]):
-        liquidez_tomada = True
-
-    if high.iloc[-1] > max(high.iloc[-5:-1]):
-        liquidez_tomada = True
-
+    # Liquidez
+    liquidez_tomada, tipo_liquidez = detectar_liquidez(df)
     if not liquidez_tomada:
         return None
 
-    # ============================
     # FVG
-    # ============================
-    fvg = low.iloc[-2] > high.iloc[-3] or high.iloc[-2] < low.iloc[-3]
-    if not fvg:
+    if not detectar_fvg(df):
         return None
 
-    # ============================
-    # SEÑAL FINAL
-    # ============================
-    if tendencia_alcista:
-        side = "LONG"
-        entry = price
-        sl = price - atr_val * 1.0
-        tp1 = price + atr_val * 1.5
-        tp2 = price + atr_val * 2.5
-    else:
-        side = "SHORT"
-        entry = price
-        sl = price + atr_val * 1.0
-        tp1 = price - atr_val * 1.5
-        tp2 = price - atr_val * 2.5
+    # Order Block
+    ob_low, ob_high = detectar_order_block(df, side)
+    if ob_low is None or ob_high is None:
+        return None
 
-    contexto = f"{estructura}; Liquidez tomada; FVG detectado; Fuerza={fuerza}"
+    # ENTRY / SL / TP
+    if side == "LONG":
+        entry = ob_high  # entrada en parte alta del OB
+        sl = ob_low - atr_val * 0.5
+        tp1 = entry + atr_val * 1.5
+        tp2 = entry + atr_val * 2.5
+    else:
+        entry = ob_low   # entrada en parte baja del OB
+        sl = ob_high + atr_val * 0.5
+        tp1 = entry - atr_val * 1.5
+        tp2 = entry - atr_val * 2.5
+
+    contexto = f"{bos}; {tipo_liquidez}; FVG; OB detectado; Fuerza={fuerza}"
 
     return {
         "side": side,
         "entry": float(entry),
         "sl": float(sl),
-        "tp1": float(tp1),
+            "tp1": float(tp1),
         "tp2": float(tp2),
         "contexto": contexto
     }
@@ -198,10 +303,10 @@ def analizar_smc_pro(df: pd.DataFrame, tipo: str):
 # LOOP PRINCIPAL
 # ============================
 async def bot_loop():
-    logging.info("Bot Híbrido PRO SMC (filtrado) iniciado en Fly.io")
+    logging.info("Bot Híbrido PRO SMC (mejorado) iniciado en Fly.io")
 
     enviar_telegram(
-        "🤖 *Bot Híbrido PRO SMC (Filtrado)*\n"
+        "🤖 *Bot Híbrido PRO SMC (Mejorado)*\n"
         "📡 Señales fuertes únicamente\n"
         "⏱ Scalping: 5m, 15m\n"
         "📈 Swing: 1h, 4h, 1D\n"
@@ -212,7 +317,7 @@ async def bot_loop():
         for par in PARES:
             for tf in TIMEFRAMES_SCALP + TIMEFRAMES_SWING:
                 try:
-                    ohlcv = exchange.fetch_ohlcv(par, tf, limit=150, params={"type": "swap"})
+                    ohlcv = exchange.fetch_ohlcv(par, tf, limit=200, params={"type": "swap"})
                     df = pd.DataFrame(ohlcv, columns=["time", "open", "high", "low", "close", "volume"])
 
                     tipo = "scalp" if tf in TIMEFRAMES_SCALP else "swing"
@@ -231,7 +336,6 @@ async def bot_loop():
 
                     ultimo_envio[clave] = ahora
 
-                    # Señal final
                     side = resultado["side"]
                     entry = resultado["entry"]
                     sl = resultado["sl"]
