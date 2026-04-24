@@ -1,13 +1,14 @@
 import ccxt
-import time
 import asyncio
 import logging
 import pandas as pd
 import numpy as np
 import os
+from flask import Flask, jsonify
+from threading import Thread
 
 # ============================
-# LOGGING PRO LIGERO
+# LOGGING LIGERO
 # ============================
 logging.basicConfig(
     level=logging.INFO,
@@ -62,10 +63,9 @@ def rsi(series, period=14):
     return 100 - (100 / (1 + rs))
 
 # ============================
-# SEÑALES PRO LIGERAS
+# SEÑALES
 # ============================
 def generar_senal(df):
-    c = df["close"].iloc[-1]
     ema_fast = df["ema_fast"].iloc[-1]
     ema_slow = df["ema_slow"].iloc[-1]
     rsi_val = df["rsi"].iloc[-1]
@@ -91,10 +91,10 @@ def ejecutar_orden(tipo):
         logging.error(f"Error ejecutando orden: {e}")
 
 # ============================
-# LOOP PRINCIPAL
+# LOOP PRINCIPAL DEL BOT
 # ============================
-async def main_loop():
-    logging.info("Bot híbrido PRO v2 LITE iniciado en Fly.io")
+async def bot_loop():
+    logging.info("Bot híbrido PRO v2 LITE unificado iniciado en Fly.io")
 
     while True:
         df = get_ohlcv()
@@ -113,11 +113,28 @@ async def main_loop():
         await asyncio.sleep(10)
 
 # ============================
-# EJECUCIÓN
+# SERVIDOR WEB /data
+# ============================
+app = Flask(__name__)
+
+@app.route("/data")
+def data():
+    return jsonify({"status": "ok", "bot": "running"})
+
+def run_flask():
+    app.run(host="0.0.0.0", port=8080)
+
+# ============================
+# EJECUCIÓN UNIFICADA
 # ============================
 if __name__ == "__main__":
+    # Lanzar Flask en un hilo
+    thread = Thread(target=run_flask)
+    thread.daemon = True
+    thread.start()
+
+    # Lanzar bot en asyncio
     try:
-        asyncio.run(main_loop())
+        asyncio.run(bot_loop())
     except Exception as e:
         logging.error(f"Error crítico: {e}")
-
