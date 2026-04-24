@@ -26,26 +26,20 @@ API_SECRET = os.getenv("API_SECRET")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Futuros USDT-M
+# FUTUROS USDT-M
 PARES = [
-    "XRPUSDT",
-    "XLMUSDT",
-    "HBARUSDT",
-    "PENGUUSDT",
-    "SOLUSDT",
-    "LINKUSDT",
-    "HYPEUSDT",
-    "ALGOUSDT",
-    "ZBCNUSDT",
-    "XPRUSDT",
-    "BNBUSDT",
-    "ZECUSDT",
-    "TAOUSDT"
+    "XRPUSDT", "XLMUSDT", "HBARUSDT", "PENGUUSDT", "SOLUSDT",
+    "LINKUSDT", "HYPEUSDT", "ALGOUSDT", "ZBCNUSDT", "XPRUSDT",
+    "BNBUSDT", "ZECUSDT", "TAOUSDT"
 ]
 
-# Timeframes
+# TIMEFRAMES
 TIMEFRAMES_SCALP = ["5m", "15m"]
 TIMEFRAMES_SWING = ["1h", "4h", "1d"]
+
+# COOLDOWN
+ultimo_envio = {}
+COOLDOWN_MINUTOS = 30  # 30 minutos entre señales por par/timeframe
 
 # ============================
 # EXCHANGE FUTUROS
@@ -54,9 +48,7 @@ exchange = ccxt.mexc({
     "apiKey": API_KEY,
     "secret": API_SECRET,
     "enableRateLimit": True,
-    "options": {
-        "defaultType": "swap"   # FUTUROS USDT-M
-    }
+    "options": {"defaultType": "swap"}
 })
 
 # ============================
@@ -75,7 +67,7 @@ def enviar_telegram(msg: str):
         logging.error(f"Error enviando Telegram: {e}")
 
 # ============================
-# UTILIDADES
+# INDICADORES
 # ============================
 def rsi(series, period=14):
     delta = series.diff()
@@ -95,19 +87,9 @@ def ema(series, period):
     return series.ewm(span=period).mean()
 
 # ============================
-# SMC PRO (ESQUELETO MEJORADO)
+# SMC PRO (FILTRADO)
 # ============================
 def analizar_smc_pro(df: pd.DataFrame, tipo: str):
-    """
-    tipo: 'scalp' o 'swing'
-    Devuelve dict con:
-      side: 'LONG' / 'SHORT' / None
-      entry, tp1, tp2, sl
-      contexto: str
-    Aquí es donde luego afinamos toda la lógica SMC avanzada.
-    Ahora dejo una base técnica decente con estructura + volatilidad.
-    """
-
     if len(df) < 50:
         return None
 
@@ -130,59 +112,78 @@ def analizar_smc_pro(df: pd.DataFrame, tipo: str):
     if np.isnan(ema_fast_val) or np.isnan(ema_slow_val) or np.isnan(rsi_val) or np.isnan(atr_val):
         return None
 
-    # Dirección básica de estructura (muy simplificada)
+    # Tendencia
     tendencia_alcista = ema_fast_val > ema_slow_val
     tendencia_bajista = ema_fast_val < ema_slow_val
 
-    # Filtro de volatilidad
-    if atr_val <= 0:
+    # ============================
+    # FILTRO DE FUERZA
+    # ============================
+    fuerza = 0
+
+    if tendencia_alcista or tendencia_bajista:
+        fuerza += 1
+
+    if rsi_val < 30 or rsi_val > 70:
+        fuerza += 1
+
+    if atr_val > price * 0.002:
+        fuerza += 1
+
+    if abs(ema_fast_val - ema_slow_val) > price * 0.0015:
+        fuerza += 1
+
+    if fuerza < 3:
         return None
 
-    # Multiplicadores distintos para scalp vs swing
-    if tipo == "scalp":
-        r_mult_sl = 0.7
-        r_mult_tp1 = 1.0
-        r_mult_tp2 = 1.8
-    else:  # swing
-        r_mult_sl = 1.0
-        r_mult_tp1 = 1.5
-        r_mult_tp2 = 2.5
-
-    side = None
-    contexto = []
-
-    # Entrada híbrida: agresiva si RSI extremo + tendencia clara, conservadora si solo tendencia + estructura
-    if tendencia_alcista and rsi_val < 65:
-        side = "LONG"
-        contexto.append("Tendencia alcista (EMA fast > EMA slow)")
-        if rsi_val < 35:
-            contexto.append("RSI en zona de sobreventa → entrada agresiva")
-        else:
-            contexto.append("RSI neutro → entrada conservadora")
-    elif tendencia_bajista and rsi_val > 35:
-        side = "SHORT"
-        contexto.append("Tendencia bajista (EMA fast < EMA slow)")
-        if rsi_val > 65:
-            contexto.append("RSI en sobrecompra → entrada agresiva")
-        else:
-            contexto.append("RSI neutro → entrada conservadora")
-
-    if side is None:
-        return None
-
-    if side == "LONG":
-        entry = price
-        sl = price - atr_val * r_mult_sl
-        tp1 = price + atr_val * r_mult_tp1
-        tp2 = price + atr_val * r_mult_tp2
+    # ============================
+    # BOS (pseudo)
+    # ============================
+    if tendencia_alcista and high.iloc[-1] > high.iloc[-2]:
+        estructura = "BOS alcista"
+    elif tendencia_bajista and low.iloc[-1] < low.iloc[-2]:
+        estructura = "BOS bajista"
     else:
-        entry = price
-        sl = price + atr_val * r_mult_sl
-        tp1 = price - atr_val * r_mult_tp1
-        tp2 = price - atr_val * r_mult_tp2
+        return None
 
-    contexto.append(f"ATR: {atr_val:.6f}")
-    contexto.append(f"RSI: {rsi_val:.2f}")
+    # ============================
+    # LIQUIDEZ
+    # ============================
+    liquidez_tomada = False
+
+    if low.iloc[-1] < min(low.iloc[-5:-1]):
+        liquidez_tomada = True
+
+    if high.iloc[-1] > max(high.iloc[-5:-1]):
+        liquidez_tomada = True
+
+    if not liquidez_tomada:
+        return None
+
+    # ============================
+    # FVG
+    # ============================
+    fvg = low.iloc[-2] > high.iloc[-3] or high.iloc[-2] < low.iloc[-3]
+    if not fvg:
+        return None
+
+    # ============================
+    # SEÑAL FINAL
+    # ============================
+    if tendencia_alcista:
+        side = "LONG"
+        entry = price
+        sl = price - atr_val * 1.0
+        tp1 = price + atr_val * 1.5
+        tp2 = price + atr_val * 2.5
+    else:
+        side = "SHORT"
+        entry = price
+        sl = price + atr_val * 1.0
+        tp1 = price - atr_val * 1.5
+        tp2 = price - atr_val * 2.5
+
+    contexto = f"{estructura}; Liquidez tomada; FVG detectado; Fuerza={fuerza}"
 
     return {
         "side": side,
@@ -190,54 +191,53 @@ def analizar_smc_pro(df: pd.DataFrame, tipo: str):
         "sl": float(sl),
         "tp1": float(tp1),
         "tp2": float(tp2),
-        "contexto": "; ".join(contexto)
+        "contexto": contexto
     }
 
 # ============================
-# LOOP PRINCIPAL MULTIPAR
+# LOOP PRINCIPAL
 # ============================
 async def bot_loop():
-    logging.info("Bot Híbrido PRO SMC (esqueleto mejorado) iniciado en Fly.io")
+    logging.info("Bot Híbrido PRO SMC (filtrado) iniciado en Fly.io")
 
     enviar_telegram(
-        "🤖 *Bot Híbrido PRO SMC*\n"
-        "📡 Modo: Scalping (5m, 15m) + Swing (1h, 4h, 1D)\n"
-        "⚠️ Trading automático: *DESACTIVADO*\n"
-        "📈 Enviando señales con Entry / TP1 / TP2 / SL."
+        "🤖 *Bot Híbrido PRO SMC (Filtrado)*\n"
+        "📡 Señales fuertes únicamente\n"
+        "⏱ Scalping: 5m, 15m\n"
+        "📈 Swing: 1h, 4h, 1D\n"
+        "⚠️ Trading automático: *DESACTIVADO*"
     )
 
     while True:
         for par in PARES:
             for tf in TIMEFRAMES_SCALP + TIMEFRAMES_SWING:
                 try:
-                    ohlcv = exchange.fetch_ohlcv(
-                        par,
-                        tf,
-                        limit=150,
-                        params={"type": "swap"}
-                    )
-                    df = pd.DataFrame(
-                        ohlcv,
-                        columns=["time", "open", "high", "low", "close", "volume"]
-                    )
+                    ohlcv = exchange.fetch_ohlcv(par, tf, limit=150, params={"type": "swap"})
+                    df = pd.DataFrame(ohlcv, columns=["time", "open", "high", "low", "close", "volume"])
 
                     tipo = "scalp" if tf in TIMEFRAMES_SCALP else "swing"
                     resultado = analizar_smc_pro(df, tipo)
 
                     if not resultado:
-                        logging.info(f"{par} [{tf}] → sin señal válida.")
                         continue
 
+                    # COOLDOWN
+                    clave = f"{par}_{tf}"
+                    ahora = datetime.utcnow().timestamp()
+
+                    if clave in ultimo_envio:
+                        if ahora - ultimo_envio[clave] < COOLDOWN_MINUTOS * 60:
+                            continue
+
+                    ultimo_envio[clave] = ahora
+
+                    # Señal final
                     side = resultado["side"]
                     entry = resultado["entry"]
                     sl = resultado["sl"]
                     tp1 = resultado["tp1"]
                     tp2 = resultado["tp2"]
                     contexto = resultado["contexto"]
-
-                    logging.info(
-                        f"{par} [{tf}] → {side} | Entry: {entry} | SL: {sl} | TP1: {tp1} | TP2: {tp2}"
-                    )
 
                     msg = (
                         f"📡 *Señal SMC PRO en {par}*\n"
@@ -259,7 +259,7 @@ async def bot_loop():
         await asyncio.sleep(20)
 
 # ============================
-# SERVIDOR WEB /data
+# SERVIDOR WEB
 # ============================
 app = Flask(__name__)
 
@@ -271,7 +271,7 @@ def run_flask():
     app.run(host="0.0.0.0", port=8080)
 
 # ============================
-# EJECUCIÓN UNIFICADA
+# EJECUCIÓN
 # ============================
 if __name__ == "__main__":
     thread = Thread(target=run_flask)
