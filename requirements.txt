@@ -1,0 +1,10 @@
+ccxt
+pandas
+numpy
+requests
+aiohttp
+cryptography
+pandas-ta
+python-dotenv
+flask
+uvicorn
